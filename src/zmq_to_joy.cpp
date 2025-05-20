@@ -2,6 +2,8 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <zmq.hpp>
 #include <sstream>
+#include <thread>
+#include <atomic>
 
 class ZMQToJoy : public rclcpp::Node {
 public:
@@ -15,30 +17,62 @@ public:
     socket_->bind(addr.str());
 
     pub_ = this->create_publisher<sensor_msgs::msg::Joy>("joy_out", 10);
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(10), std::bind(&ZMQToJoy::poll, this));
+
+    RCLCPP_INFO(this->get_logger(),
+                "Receiving Joy on %s:%d and publishing to topic '%s'",
+                bind_ip_.c_str(), bind_port_, "joy_out");
+
+    recv_thread_ = std::thread([this]() { this->recv_loop(); });
+
+    rclcpp::on_shutdown([this]() { this->stop(); });
   }
 
+  ~ZMQToJoy() override { stop(); }
+
 private:
-  void poll() {
-    zmq::message_t msg;
-    auto result = socket_->recv(msg, zmq::recv_flags::dontwait);
-    if (!result)
-      return;
+  void stop() {
+    if (running_) {
+      running_ = false;
+      try {
+        if (socket_)
+          socket_->close();
+      } catch (const zmq::error_t &e) {
+        RCLCPP_WARN(this->get_logger(), "ZMQ close failed: %s", e.what());
+      }
+    }
+    if (recv_thread_.joinable())
+      recv_thread_.join();
+  }
+  void recv_loop() {
+    while (running_) {
+      zmq::message_t msg;
+      try {
+        socket_->recv(msg, zmq::recv_flags::none);
+      } catch (const zmq::error_t &e) {
+        if (!running_)
+          break;
+        RCLCPP_WARN(this->get_logger(), "ZMQ recv failed: %s", e.what());
+        continue;
+      }
 
-    std::string data(static_cast<char*>(msg.data()), msg.size());
-    sensor_msgs::msg::Joy joy_msg;
+      if (!running_)
+        break;
 
-    auto buttons_pos = data.find("|buttons:");
-    if (buttons_pos == std::string::npos)
-      return;
+      std::string data(static_cast<char*>(msg.data()), msg.size());
+      sensor_msgs::msg::Joy joy_msg;
 
-    std::string axes_part = data.substr(6, buttons_pos - 6); // after "axes:"
-    std::string buttons_part = data.substr(buttons_pos + 9); // after "|buttons:"
+      auto buttons_pos = data.find("|buttons:");
+      if (buttons_pos == std::string::npos)
+        continue;
 
-    parse_floats(axes_part, joy_msg.axes);
-    parse_ints(buttons_part, joy_msg.buttons);
+      std::string axes_part = data.substr(6, buttons_pos - 6); // after "axes:"
+      std::string buttons_part = data.substr(buttons_pos + 9); // after "|buttons:"
 
-    pub_->publish(joy_msg);
+      parse_floats(axes_part, joy_msg.axes);
+      parse_ints(buttons_part, joy_msg.buttons);
+
+      pub_->publish(joy_msg);
+    }
   }
 
   void parse_floats(const std::string &str, std::vector<float> &out) {
@@ -64,7 +98,8 @@ private:
   zmq::context_t context_{1};
   std::unique_ptr<zmq::socket_t> socket_;
   rclcpp::Publisher<sensor_msgs::msg::Joy>::SharedPtr pub_;
-  rclcpp::TimerBase::SharedPtr timer_;
+  std::thread recv_thread_;
+  std::atomic_bool running_{true};
   std::string bind_ip_;
   int bind_port_;
 };

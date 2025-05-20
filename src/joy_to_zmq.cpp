@@ -14,6 +14,10 @@ public:
     addr << "tcp://" << target_ip_ << ":" << target_port_;
     socket_->connect(addr.str());
 
+    RCLCPP_INFO(this->get_logger(),
+                "Sending Joy messages from topic '%s' to %s:%d",
+                "joy", target_ip_.c_str(), target_port_);
+
     sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
       "joy", 10, std::bind(&JoyToZMQ::joy_callback, this, std::placeholders::_1));
   }
