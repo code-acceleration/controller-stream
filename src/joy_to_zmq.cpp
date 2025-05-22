@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <zmq.hpp>
+#include <cstring>
 #include <sstream>
 
 class JoyToZMQ : public rclcpp::Node {
@@ -24,19 +25,30 @@ public:
 
 private:
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg) {
-    std::ostringstream out;
-    out << "axes:";
-    for (size_t i = 0; i < msg->axes.size(); ++i) {
-      if (i) out << ',';
-      out << msg->axes[i];
+    uint32_t axes_count = static_cast<uint32_t>(msg->axes.size());
+    uint32_t buttons_count = static_cast<uint32_t>(msg->buttons.size());
+
+    size_t total_size = sizeof(uint32_t) * 2 +
+                        axes_count * sizeof(float) +
+                        buttons_count * sizeof(int32_t);
+
+    zmq::message_t message(total_size);
+    size_t offset = 0;
+    std::memcpy(static_cast<char*>(message.data()) + offset, &axes_count,
+                sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+    std::memcpy(static_cast<char*>(message.data()) + offset, &buttons_count,
+                sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+    if (axes_count > 0) {
+      std::memcpy(static_cast<char*>(message.data()) + offset,
+                  msg->axes.data(), axes_count * sizeof(float));
+      offset += axes_count * sizeof(float);
     }
-    out << "|buttons:";
-    for (size_t i = 0; i < msg->buttons.size(); ++i) {
-      if (i) out << ',';
-      out << msg->buttons[i];
+    if (buttons_count > 0) {
+      std::memcpy(static_cast<char*>(message.data()) + offset,
+                  msg->buttons.data(), buttons_count * sizeof(int32_t));
     }
-    auto data = out.str();
-    zmq::message_t message(data.begin(), data.end());
     try {
       socket_->send(message, zmq::send_flags::dontwait);
     } catch (const zmq::error_t &e) {
