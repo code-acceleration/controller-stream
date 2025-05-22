@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <zmq.hpp>
+#include <cstring>
 #include <sstream>
 #include <thread>
 #include <atomic>
@@ -12,6 +13,9 @@ public:
     bind_port_ = this->declare_parameter<int>("bind_port", 5555);
 
     socket_ = std::make_unique<zmq::socket_t>(context_, zmq::socket_type::pull);
+    socket_->set(zmq::sockopt::rcvhwm, 1);
+    socket_->set(zmq::sockopt::conflate, 1);
+    socket_->set(zmq::sockopt::tcp_keepalive, 1);
     std::stringstream addr;
     addr << "tcp://" << bind_ip_ << ":" << bind_port_;
     socket_->bind(addr.str());
@@ -45,9 +49,9 @@ private:
   }
   void recv_loop() {
     while (running_) {
-      zmq::message_t msg;
+      message_.rebuild();
       try {
-        socket_->recv(msg, zmq::recv_flags::none);
+        socket_->recv(message_, zmq::recv_flags::none);
       } catch (const zmq::error_t &e) {
         if (!running_)
           break;
@@ -58,45 +62,46 @@ private:
       if (!running_)
         break;
 
-      std::string data(static_cast<char*>(msg.data()), msg.size());
-      sensor_msgs::msg::Joy joy_msg;
+      const char *data = static_cast<const char *>(message_.data());
+      size_t size = message_.size();
 
-      auto buttons_pos = data.find("|buttons:");
-      if (buttons_pos == std::string::npos)
+      if (size < sizeof(uint32_t) * 2)
         continue;
 
-      std::string axes_part = data.substr(6, buttons_pos - 6); // after "axes:"
-      std::string buttons_part = data.substr(buttons_pos + 9); // after "|buttons:"
+      uint32_t axes_count = 0;
+      uint32_t buttons_count = 0;
+      std::memcpy(&axes_count, data, sizeof(uint32_t));
+      std::memcpy(&buttons_count, data + sizeof(uint32_t), sizeof(uint32_t));
 
-      parse_floats(axes_part, joy_msg.axes);
-      parse_ints(buttons_part, joy_msg.buttons);
+      size_t expected = sizeof(uint32_t) * 2 +
+                        axes_count * sizeof(float) +
+                        buttons_count * sizeof(int32_t);
+
+      if (size != expected)
+        continue;
+
+      sensor_msgs::msg::Joy joy_msg;
+      joy_msg.axes.resize(axes_count);
+      joy_msg.buttons.resize(buttons_count);
+
+      size_t offset = sizeof(uint32_t) * 2;
+      if (axes_count > 0) {
+        std::memcpy(joy_msg.axes.data(), data + offset,
+                    axes_count * sizeof(float));
+        offset += axes_count * sizeof(float);
+      }
+      if (buttons_count > 0) {
+        std::memcpy(joy_msg.buttons.data(), data + offset,
+                    buttons_count * sizeof(int32_t));
+      }
 
       pub_->publish(joy_msg);
     }
   }
 
-  void parse_floats(const std::string &str, std::vector<float> &out) {
-    std::stringstream ss(str);
-    std::string item;
-    while (std::getline(ss, item, ',')) {
-      if (!item.empty()) {
-        out.push_back(std::stof(item));
-      }
-    }
-  }
-
-  void parse_ints(const std::string &str, std::vector<int32_t> &out) {
-    std::stringstream ss(str);
-    std::string item;
-    while (std::getline(ss, item, ',')) {
-      if (!item.empty()) {
-        out.push_back(std::stoi(item));
-      }
-    }
-  }
-
   zmq::context_t context_{1};
   std::unique_ptr<zmq::socket_t> socket_;
+  zmq::message_t message_;
   rclcpp::Publisher<sensor_msgs::msg::Joy>::SharedPtr pub_;
   std::thread recv_thread_;
   std::atomic_bool running_{true};
