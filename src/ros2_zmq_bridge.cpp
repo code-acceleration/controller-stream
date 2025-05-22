@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialized_message.hpp>
+#include <rclcpp/generic_publisher.hpp>
 #include <zmq.hpp>
 #include <cstring>
 #include <sstream>
@@ -102,7 +103,7 @@ private:
   std::thread recv_thread_;
   std::atomic_bool running_{true};
   rclcpp::SubscriptionBase::SharedPtr sub_;
-  rclcpp::PublisherBase::SharedPtr pub_;
+  rclcpp::GenericPublisher::SharedPtr pub_;
   std::string mode_;
   std::string topic_name_;
   std::string type_name_;
