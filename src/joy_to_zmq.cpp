@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <zmq.hpp>
+#include <cstring>
 #include <sstream>
 
 class JoyToZMQ : public rclcpp::Node {
@@ -10,6 +11,9 @@ public:
     target_port_ = this->declare_parameter<int>("target_port", 5555);
 
     socket_ = std::make_unique<zmq::socket_t>(context_, zmq::socket_type::push);
+    socket_->set(zmq::sockopt::sndhwm, 1);
+    socket_->set(zmq::sockopt::conflate, 1);
+    socket_->set(zmq::sockopt::tcp_keepalive, 1);
     std::stringstream addr;
     addr << "tcp://" << target_ip_ << ":" << target_port_;
     socket_->connect(addr.str());
@@ -20,25 +24,50 @@ public:
 
     sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
       "joy", 10, std::bind(&JoyToZMQ::joy_callback, this, std::placeholders::_1));
+
+    rclcpp::on_shutdown([this]() { this->close(); });
   }
 
+  ~JoyToZMQ() override { close(); }
+
 private:
-  void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg) {
-    std::ostringstream out;
-    out << "axes:";
-    for (size_t i = 0; i < msg->axes.size(); ++i) {
-      if (i) out << ',';
-      out << msg->axes[i];
-    }
-    out << "|buttons:";
-    for (size_t i = 0; i < msg->buttons.size(); ++i) {
-      if (i) out << ',';
-      out << msg->buttons[i];
-    }
-    auto data = out.str();
-    zmq::message_t message(data.begin(), data.end());
+  void close() {
     try {
-      socket_->send(message, zmq::send_flags::dontwait);
+      if (socket_)
+        socket_->close();
+    } catch (const zmq::error_t &e) {
+      RCLCPP_WARN(this->get_logger(), "ZMQ close failed: %s", e.what());
+    }
+  }
+
+  void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg) {
+    uint32_t axes_count = static_cast<uint32_t>(msg->axes.size());
+    uint32_t buttons_count = static_cast<uint32_t>(msg->buttons.size());
+
+    size_t total_size = sizeof(uint32_t) * 2 +
+                        axes_count * sizeof(float) +
+                        buttons_count * sizeof(int32_t);
+
+    message_.rebuild(total_size);
+    size_t offset = 0;
+    std::memcpy(static_cast<char*>(message_.data()) + offset, &axes_count,
+                sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+    std::memcpy(static_cast<char*>(message_.data()) + offset, &buttons_count,
+                sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+    if (axes_count > 0) {
+      std::memcpy(static_cast<char*>(message_.data()) + offset,
+                  msg->axes.data(), axes_count * sizeof(float));
+      offset += axes_count * sizeof(float);
+    }
+    if (buttons_count > 0) {
+      std::memcpy(static_cast<char*>(message_.data()) + offset,
+                  msg->buttons.data(), buttons_count * sizeof(int32_t));
+    }
+    try {
+      socket_->send(zmq::const_buffer(message_.data(), message_.size()),
+                    zmq::send_flags::dontwait);
     } catch (const zmq::error_t &e) {
       RCLCPP_WARN(this->get_logger(), "ZMQ send failed: %s", e.what());
     }
@@ -46,6 +75,7 @@ private:
 
   zmq::context_t context_{1};
   std::unique_ptr<zmq::socket_t> socket_;
+  zmq::message_t message_;
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr sub_;
   std::string target_ip_;
   int target_port_;
