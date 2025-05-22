@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(ros2-zmq-briadge)
+project(ros2-zmq-bridge)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
