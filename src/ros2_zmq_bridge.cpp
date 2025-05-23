@@ -48,13 +48,13 @@ public:
       rclcpp::shutdown();
     }
 
-    rclcpp::on_shutdown([this]() { this->stop(); });
+    rclcpp::on_shutdown([this]() { this->signal_stop(); });
   }
 
   ~Ros2ZmqBridge() override { stop(); }
 
 private:
-  void stop() {
+  void signal_stop() {
     if (running_) {
       running_ = false;
       try {
@@ -64,6 +64,10 @@ private:
         RCLCPP_WARN(this->get_logger(), "ZMQ close failed: %s", e.what());
       }
     }
+  }
+
+  void stop() {
+    signal_stop();
     if (recv_thread_.joinable())
       recv_thread_.join();
   }
